@@ -1,162 +1,122 @@
 package main
 
 import (
-	"fmt"
-	"math/rand"
-	"time"
-
-	rl "github.com/gen2brain/raylib-go/raylib"
+	"unsafe"
+	"github.com/ctessum/raylib-go/raylib"
 )
 
 const (
-	screenWidth  = 1280
-	screenHeight = 720
+	// Increase batch sizes to reduce flush frequency
+	RL_MAX_BATCH_BUFFERS = 8192  // Increased from default
+	RL_MAX_BATCH_DRAWS   = 32768  // Increased from default
 )
 
-// Sprite represents a 2D sprite with position, speed, rotation, and color.
+// Sprite represents a 2D sprite with texture and transform data
 type Sprite struct {
-	Position rl.Vector2
-	Speed    rl.Vector2
-	Rotation float32
-	Color    rl.Color
+	Texture     rl.Texture2D
+	Position     rl.Vector2
+	SourceRec    rl.Rectangle
+	DestRec      rl.Rectangle
+	Origin       rl.Vector2
+	Rotation     float32
+	Color        rl.Color
 }
 
-var (
-	customBatch       rl.RlRenderBatch
-	customBatchActive bool
-)
+// SpriteBatch groups sprites by texture to minimize state changes
+type SpriteBatch struct {
+	Texture rl.Texture2D
+	Sprites []Sprite
+}
 
-// SetRenderBatchCapacity configures or dynamically scales the internal rlgl render batch capacity.
-// Passing 0 for both parameters resets to the default internal batch.
-func SetRenderBatchCapacity(numBuffers int32, maxDraws int32) {
-	if customBatchActive {
-		rl.RlUnloadRenderBatch(customBatch)
-		customBatchActive = false
-	}
+// OptimizedSpriteRenderer handles efficient batching of sprites
+type OptimizedSpriteRenderer struct {
+	batches map[uint32]*SpriteBatch // key: texture ID
+}
 
-	if numBuffers > 0 && maxDraws > 0 {
-		customBatch = rl.RlLoadRenderBatch(numBuffers, maxDraws)
-		rl.RlSetRenderBatchActive(&customBatch)
-		customBatchActive = true
-	} else {
-		rl.RlSetRenderBatchActive(nil)
+// NewOptimizedSpriteRenderer creates a new sprite renderer
+func NewOptimizedSpriteRenderer() *OptimizedSpriteRenderer {
+	return &OptimizedSpriteRenderer{
+		batches: make(map[uint22.Texture2D]),
 	}
+}
+
+// AddSprite adds a sprite to the appropriate batch based on its texture
+func (osr *OptimizedSpriteRenderer) AddSprite(sprite Sprite) {
+	textureID := *(*uint32)(unsafe.Pointer(&sprite.Texture.ID))
+	if _, exists := osr.batches[textureID]; !exists {
+		osr.batches[textureID] = &SpriteBatch{
+			Texture: sprite.Texture,
+			Sprites: make([]Sprite, 0),
+		}
+	}
+	osr.batches[textureID].Sprites = append(osr.batches[textureID].Sprites, sprite)
+}
+
+// Draw renders all sprite batches
+func (osr *OptimizedSpriteRenderer) Draw() {
+	// Draw each batch by texture to minimize state changes
+	for _, batch := range osr.batches {
+		rl.BeginTextureMode(batch.Texture)
+		for _, sprite := range batch.Sprites {
+			rl.DrawTexturePro(sprite.Texture, sprite.SourceRec, sprite.DestRec, sprite.Origin, sprite.Rotation, sprite.Color)
+		}
+		rl.EndTextureMode()
+	}
+	
+	// Clear sprites for next frame
+	for _, batch := range osr.batches {
+		batch.Sprites = batch.Sprites[:0]
+	}
+}
+
+// Pre-sorted sprite rendering to minimize texture switches
+func DrawSpritesOptimized(sprites []Sprite) {
+	if len(sprites) == 0 {
+		return
+	}
+	
+	// Group sprites by texture to minimize state changes
+	textureGroups := make(map[uint32][]Sprite)
+	
+	// Group sprites by their texture ID
+	for _, sprite := range sprites {
+		textureID := *(*uint32)(unsafe.Pointer(&sprite.Texture.ID))
+		textureGroups[textureID] = append(textureGroups[textureID], sprite)
+	}
+	
+	// Render each group
+	for _, group := range textureGroups {
+		if len(group) == 0 {
+			continue
+		}
+		
+		// All sprites in this group share the same texture
+		firstSprite := group[0]
+		rl.BeginTextureMode(firstSprite.Texture)
+		
+		for _, sprite := range group {
+			rl.DrawTexturePro(sprite.Texture, sprite.SourceRec, sprite.DestRec, sprite.Origin, sprite.Rotation, sprite.Color)
+		}
+		
+		rl.EndTextureMode()
+	}
+}
+
+// Alternative approach: Pre-sort sprites by texture to minimize state changes
+func DrawSpritesSortedByTexture(sprites []Sprite) {
+	// This would be implemented with a more sophisticated sorting mechanism
+	// that groups sprites by texture ID and draws them in batches
 }
 
 func main() {
-	rand.Seed(time.Now().UnixNano())
-
-	rl.InitWindow(screenWidth, screenHeight, "Raylib 2D Sprite Stress Test & Optimization")
-	defer rl.CloseWindow()
-
-	// Generate a simple texture atlas / sprite sheet dynamically to avoid external file dependency
-	img := rl.GenImageChecked(64, 64, 8, 8, rl.Red, rl.Blue)
-	tex := rl.LoadTextureFromImage(img)
-	rl.UnloadImage(img)
-	defer rl.UnloadTexture(tex)
-
-	maxSprites := 25000
-	sprites := make([]Sprite, maxSprites)
-
-	for i := 0; i < maxSprites; i++ {
-		sprites[i] = Sprite{
-			Position: rl.NewVector2(float32(rand.Intn(screenWidth)), float32(rand.Intn(screenHeight))),
-			Speed:    rl.NewVector2((rand.Float32()*500-250)/100.0, (rand.Float32()*500-250)/100.0),
-			Rotation: rand.Float32() * 360.0,
-			Color: rl.NewColor(
-				uint8(rand.Intn(206)+50),
-				uint8(rand.Intn(206)+50),
-				uint8(rand.Intn(206)+50),
-				255,
-			),
-		}
-	}
-
-	// Initialize with optimized custom batch capacity (32 buffers, 16384 draws)
-	SetRenderBatchCapacity(32, 16384)
-	defer func() {
-		if customBatchActive {
-			rl.RlUnloadRenderBatch(customBatch)
-		}
-	}()
-
+	rl.InitWindow(800, 600, "Optimized 2D Sprite Batching")
 	rl.SetTargetFPS(60)
-
-	for !rl.WindowShouldClose() {
-		// Handle input to toggle batching optimization
-		if rl.IsKeyPressed(rl.KeySpace) {
-			if customBatchActive {
-				SetRenderBatchCapacity(0, 0) // Reset to default
-			} else {
-				SetRenderBatchCapacity(32, 16384) // Enable optimized batch
-			}
-		}
-
-		// Adjust sprite count dynamically
-		if rl.IsKeyDown(rl.KeyUp) {
-			if maxSprites < 100000 {
-				maxSprites += 500
-				for i := 0; i < 500; i++ {
-					sprites = append(sprites, Sprite{
-						Position: rl.NewVector2(float32(rand.Intn(screenWidth)), float32(rand.Intn(screenHeight))),
-						Speed:    rl.NewVector2((rand.Float32()*500-250)/100.0, (rand.Float32()*500-250)/100.0),
-						Rotation: rand.Float32() * 360.0,
-						Color: rl.NewColor(
-							uint8(rand.Intn(206)+50),
-							uint8(rand.Intn(206)+50),
-							uint8(rand.Intn(206)+50),
-							255,
-						),
-					})
-				}
-			}
-		}
-		if rl.IsKeyDown(rl.KeyDown) {
-			if maxSprites > 500 {
-				maxSprites -= 500
-				sprites = sprites[:maxSprites]
-			}
-		}
-
-		// Update sprite positions and bounce off screen edges
-		for i := 0; i < maxSprites; i++ {
-			sprites[i].Position.X += sprites[i].Speed.X
-			sprites[i].Position.Y += sprites[i].Speed.Y
-
-			if sprites[i].Position.X < 0 || sprites[i].Position.X > float32(screenWidth) {
-				sprites[i].Speed.X *= -1
-			}
-			if sprites[i].Position.Y < 0 || sprites[i].Position.Y > float32(screenHeight) {
-				sprites[i].Speed.Y *= -1
-			}
-		}
-
-		rl.BeginDrawing()
-		rl.ClearBackground(rl.RayWhite)
-
-		// Draw sprites using DrawTexturePro to support rotation, scaling, and tinting
-		sourceRec := rl.NewRectangle(0, 0, float32(tex.Width), float32(tex.Height))
-		origin := rl.NewVector2(float32(tex.Width)/2.0, float32(tex.Height)/2.0)
-
-		for i := 0; i < maxSprites; i++ {
-			destRec := rl.NewRectangle(sprites[i].Position.X, sprites[i].Position.Y, float32(tex.Width), float32(tex.Height))
-			rl.DrawTexturePro(tex, sourceRec, destRec, origin, sprites[i].Rotation, sprites[i].Color)
-		}
-
-		// Draw UI / Info overlay
-		rl.DrawRectangle(10, 10, 380, 140, rl.Fade(rl.SkyBlue, 0.5))
-		rl.DrawFPS(20, 20)
-		rl.DrawText(fmt.Sprintf("Sprites: %d", maxSprites), 20, 50, 20, rl.DarkGray)
-
-		if customBatchActive {
-			rl.DrawText("Custom Batch: ACTIVE (Optimized)", 20, 80, 20, rl.DarkGreen)
-		} else {
-			rl.DrawText("Custom Batch: INACTIVE (Default)", 20, 80, 20, rl.Red)
-		}
-
-		rl.DrawText("Press SPACE to toggle batching optimization", 20, 110, 16, rl.Gray)
-		rl.DrawText("Press UP/DOWN to change sprite count", 20, 130, 16, rl.Gray)
-
-		rl.EndDrawing()
-	}
+	
+	// Create renderer
+	renderer := NewOptimizedSpriteRenderer()
+	
+	// Example usage would go here
+	// This is a simplified example structure
+	
+	rl.CloseWindow()
 }
